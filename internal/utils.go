@@ -43,20 +43,57 @@ func PrintJSON[T any](v T) {
 	fmt.Println(string(out))
 }
 
-// ReadNumberInput reads a number from standard input. The number must be within i and j. If it is not, it will retry.
+// ReadNumberInput reads a number from standard input. The number must be within i and j.
+// It now accepts a single digit immediately when the user presses the key (no Enter required).
+// If the terminal cannot be switched to raw mode it falls back to the previous behavior.
 func ReadNumberInput(i, j int) int {
 	res := i - 1
-	scanner := bufio.NewScanner(os.Stdin)
+
+	// Try to switch the terminal into raw mode so we can read a single keypress.
+	fd := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		// Fallback to line-based input if raw mode isn't available.
+		scanner := bufio.NewScanner(os.Stdin)
+		for res < i || res > j {
+			scanner.Scan()
+			in := scanner.Text()
+			nr, err := strconv.Atoi(in)
+			if err != nil || nr < i || nr > j {
+				fmt.Print("Please enter a number: ")
+				continue
+			}
+			res = nr
+		}
+		return res
+	}
+	// Ensure terminal state is restored.
+	defer func() { _ = term.Restore(fd, oldState) }()
+
+	buf := make([]byte, 1)
 	for res < i || res > j {
-		scanner.Scan()
-		in := scanner.Text()
-		nr, err := strconv.Atoi(in)
-		if err != nil || nr < i || nr > j {
-			fmt.Print("Please enter a number: ")
+		fmt.Print("Please enter a number: ")
+		// Read a single byte (key press).
+		n, err := os.Stdin.Read(buf)
+		if err != nil || n == 0 {
 			continue
 		}
-		res = nr
+		b := buf[0]
+		// Accept only ASCII digits 0-9.
+		if b >= '0' && b <= '9' {
+			nr := int(b - '0')
+			// Echo the pressed key and newline so the user sees their input.
+			fmt.Println(string(b))
+			if nr >= i && nr <= j {
+				res = nr
+				break
+			}
+			// If out of range, loop and prompt again.
+			continue
+		}
+		// Ignore other keys and keep waiting for a digit.
 	}
+
 	return res
 }
 
@@ -143,4 +180,32 @@ func WrapLines(s string, lineLength uint) string {
 	}
 
 	return result
+}
+
+// FormatMarkdown converts a small subset of Markdown (bold, italics, links) to console-friendly output.
+// - Bold: **text** or __text__ -> ANSI bold
+// - Italic: *text* or _text_ -> ANSI italic
+// - Links: [label](url) -> "label (url)"
+//
+// This implementation is intentionally small and does not attempt to fully parse Markdown.
+// It performs simple regex-based replacements which are sufficient for basic formatting.
+func FormatMarkdown(s string) string {
+	// Convert links first so we don't accidentally format parts of the URL as bold/italic.
+	linkRe := regexp.MustCompile(`(?s)\[([^\]]+)\]\(([^)]+)\)`)
+	s = linkRe.ReplaceAllString(s, "$1 ($2)")
+
+	// Bold: **text** and __text__ (two separate, since Go regexp does not support backreferences)
+	boldRe1 := regexp.MustCompile(`(?s)\*\*(.+?)\*\*`)
+	s = boldRe1.ReplaceAllString(s, "\033[1m$1\033[0m")
+	boldRe2 := regexp.MustCompile(`(?s)__(.+?)__`)
+	s = boldRe2.ReplaceAllString(s, "\033[1m$1\033[0m")
+
+	// Italic: *text* and _text_
+	// Run after bold so **...** / __...__ are already handled.
+	italicRe1 := regexp.MustCompile(`(?s)\*(.+?)\*`)
+	s = italicRe1.ReplaceAllString(s, "\033[3m$1\033[0m")
+	italicRe2 := regexp.MustCompile(`(?s)_(.+?)_`)
+	s = italicRe2.ReplaceAllString(s, "\033[3m$1\033[0m")
+
+	return s
 }

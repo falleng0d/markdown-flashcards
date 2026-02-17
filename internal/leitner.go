@@ -190,6 +190,7 @@ func (s *Session) flashNextCard() (c *Card, difficulty float32) {
 	fmt.Printf(" ---")
 
 	front := WrapLines(c.Front, s.WrapLines)
+	front = FormatMarkdown(front)
 	fmt.Printf("\n\n%s\n", front)
 
 	fmt.Print("--> Press enter to show the back side.")

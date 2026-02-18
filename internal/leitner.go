@@ -12,6 +12,8 @@ const (
 	Hard          = 0.8
 	Okay          = 1
 	Easy          = 1.5
+	// Disabled is a sentinel value used when the user disables a card during a session.
+	Disabled = -1
 )
 
 // boxIntervals are the days between the last review and the next review, and they depend on the box the card is in.
@@ -25,6 +27,7 @@ type Card struct {
 	// Box number starts at 0
 	Box uint
 	Due time.Time
+	Enabled bool
 }
 
 type File struct {
@@ -70,6 +73,11 @@ func (s *Session) Start() {
 	for len(s.studyQueue) > 0 {
 		ScrollDownScreen()
 		card, difficulty := s.flashNextCard()
+
+		// If the user disabled the card (option 5), it has already been updated in the file; skip further processing.
+		if difficulty == Disabled {
+			continue
+		}
 
 		// If in test mode, don't update the metadata.
 		if s.TestMode {
@@ -129,6 +137,12 @@ func (s *Session) assembleStudyQueue() {
 
 	for i := 0; i < len(s.File.Cards); i++ {
 		c := &s.File.Cards[i]
+
+		// Skip disabled cards.
+		if !c.Enabled {
+			continue
+		}
+
 		if s.NumberCards == 0 && s.Category == "" {
 			// Study all cards.
 			s.studyQueue = append(s.studyQueue, c)
@@ -200,8 +214,8 @@ func (s *Session) flashNextCard() (c *Card, difficulty float32) {
 	fmt.Printf("\n%s\n", back)
 
 	fmt.Println("--> How difficult was it to remember?")
-	fmt.Printf("--> (1) Not remembered, (2) Hard, (3) Okay, (4) Easy: ")
-	d := ReadNumberInput(1, 4)
+	fmt.Printf("--> (1) Not remembered, (2) Hard, (3) Okay, (4) Easy, (5) Disable card: ")
+	d := ReadNumberInput(1, 5)
 	switch d {
 	case 1:
 		difficulty = NotRemembered
@@ -211,6 +225,12 @@ func (s *Session) flashNextCard() (c *Card, difficulty float32) {
 		difficulty = Okay
 	case 4:
 		difficulty = Easy
+	case 5:
+		// Disable the card: mark as disabled and persist to file immediately.
+		difficulty = Disabled
+		c.Enabled = false
+		s.updateCardInFile(c)
+		return c, difficulty
 	}
 	return c, difficulty
 }

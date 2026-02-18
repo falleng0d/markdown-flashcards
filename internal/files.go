@@ -15,32 +15,61 @@ import (
 	gonanoid "github.com/matoous/go-nanoid"
 )
 
-// getMetadata extracts the metadata (ID, box, due date; embedded in html comment tag) from a line.
-func getMetadata(line string) (id, box, due string) {
-	re := regexp.MustCompile(`<!--\s*(.{4});(\d);(\d{4}-\d{2}-\d{2})\s*-->`)
+// getMetadata extracts the metadata (ID, box, due date, enabled; embedded in html comment tag) from a line.
+// Supported forms:
+//   <!--ID;box;YYYY-MM-DD-->
+//   <!--ID;box;YYYY-MM-DD;true|false-->
+func getMetadata(line string) (id, box, due string, enabled bool) {
+	re := regexp.MustCompile(`<!--\s*(.{4});(\d);(\d{4}-\d{2}-\d{2})(?:;(true|false))?\s*-->`)
 	matches := re.FindStringSubmatch(line)
-	if len(matches) == 4 {
-		return matches[1], matches[2], matches[3]
+	if len(matches) >= 4 {
+		id = matches[1]
+		box = matches[2]
+		due = matches[3]
+		if len(matches) >= 5 && matches[4] != "" {
+			enabled = matches[4] == "true"
+		} else {
+			// default to enabled for retrocompatibility
+			enabled = true
+		}
+		return id, box, due, enabled
 	}
-	return
+	return "", "", "", true
 }
 
-// initializeMetadata initializes the metadata (ID, box, due date; embedded in html comment tag) for a new card.
-func initializeMetadata(line string) (updatedLine, id, box, due string) {
+// initializeMetadata initializes the metadata (ID, box, due date, enabled; embedded in html comment tag) for a new card.
+func initializeMetadata(line string) (updatedLine, id, box, due string, enabled bool) {
 	id = gonanoid.MustGenerate("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", 4)
 	box = "0"
 	due = time.Now().Format("2006-01-02")
+	enabled = true
 	// Make sure there are no unrecognized html comment tags present in the line
 	updatedLine = regexp.MustCompile(`\s*<!--.*-->`).ReplaceAllString(line, "")
-	updatedLine = fmt.Sprintf("%s <!--%s;%s;%s-->", updatedLine, id, box, due)
+	// Include the enabled flag for new metadata (retrocompatible parsers will ignore it)
+	updatedLine = fmt.Sprintf("%s <!--%s;%s;%s;%t-->", updatedLine, id, box, due, enabled)
 	return
 }
 
 // generateNewId generates a new id for a card and updates the line with the new id.
+// It preserves existing box/due/enabled when possible. If no metadata is present it will append new metadata.
 func generateNewId(line string) (updatedLine, id string) {
-	re := regexp.MustCompile(`<!--\s*(.{4});(\d);(\d{4}-\d{2}-\d{2})\s*-->`)
+	re := regexp.MustCompile(`<!--\s*(.{4});(\d);(\d{4}-\d{2}-\d{2})(?:;(true|false))?\s*-->`)
+	matches := re.FindStringSubmatch(line)
 	id = gonanoid.MustGenerate("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", 4)
-	updatedLine = re.ReplaceAllString(line, fmt.Sprintf("<!--%s;$2;$3-->", id))
+	if len(matches) >= 4 {
+		// matches[2] = box, matches[3] = due, matches[4] = enabled (if present)
+		updated := fmt.Sprintf("<!--%s;%s;%s", id, matches[2], matches[3])
+		if len(matches) >= 5 && matches[4] != "" {
+			updated = fmt.Sprintf("%s;%s", updated, matches[4])
+		}
+		updated = updated + "-->"
+		updatedLine = re.ReplaceAllString(line, updated)
+		return
+	}
+	// Fallback: append a fresh metadata block (shouldn't commonly happen because OpenFile initializes missing metadata)
+	y, m, d := time.Now().Date()
+	due := time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	updatedLine = strings.TrimRight(line, " ") + " " + fmt.Sprintf("<!--%s;0;%s;true-->", id, due)
 	return
 }
 
@@ -57,8 +86,9 @@ func extractQuestion(line string) string {
 // getCardFromLine extracts the card data from a second-level (or third, etc.) markdown header.
 func getCardFromLine(line, category string) (card Card) {
 	card.Category = category
-	id, box, due := getMetadata(line)
+	id, box, due, enabled := getMetadata(line)
 	card.Id = id
+	card.Enabled = enabled
 	boxUint, err := strconv.Atoi(box)
 	check(err)
 	card.Box = uint(boxUint)
@@ -91,9 +121,9 @@ func (s *Session) OpenFile(path string) error {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") || strings.HasPrefix(line, "#### ") {
-			id, _, _ := getMetadata(line)
+			id, _, _, _ := getMetadata(line)
 			if id == "" {
-				line, id, _, _ = initializeMetadata(line)
+				line, id, _, _, _ = initializeMetadata(line)
 			}
 			for ids[id] {
 				line, id = generateNewId(line)
@@ -162,8 +192,9 @@ func (s *Session) updateCardInFile(c *Card) {
 	data, err := os.ReadFile(s.File.Path)
 	check(err)
 	md := string(data)
-	re := regexp.MustCompile(fmt.Sprintf(`<!--\s*%s;\d;\d{4}-\d{2}-\d{2}\s*-->`, c.Id))
-	md = re.ReplaceAllString(md, fmt.Sprintf("<!--%s;%d;%s-->", c.Id, c.Box, c.Due.Format("2006-01-02")))
+	// Match metadata with optional enabled flag and replace it with a normalized version that includes enabled.
+	re := regexp.MustCompile(fmt.Sprintf(`<!--\s*%s;\d;\d{4}-\d{2}-\d{2}(?:;(true|false))?\s*-->`, c.Id))
+	md = re.ReplaceAllString(md, fmt.Sprintf("<!--%s;%d;%s;%t-->", c.Id, c.Box, c.Due.Format("2006-01-02"), c.Enabled))
 	err = os.WriteFile(s.File.Path, []byte(md), 0644)
 	check(err)
 }
@@ -219,7 +250,7 @@ func CreateCopyToShare(path string) error {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") || strings.HasPrefix(line, "#### ") {
-			line, _, _, _ = initializeMetadata(line)
+			line, _, _, _, _ = initializeMetadata(line)
 		}
 		_, err := newF.WriteString(line + "\n")
 		check(err)
